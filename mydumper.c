@@ -58,6 +58,8 @@ static GMutex * init_mutex = NULL;
 /* Program options */
 gchar *output_directory= NULL;
 gchar *output_filename=NULL;
+gboolean output_stdout=TRUE;
+
 GHashTable *output_filename_array=NULL;
 guint statement_size= 1000000;
 guint rows_per_file= 0;
@@ -106,6 +108,7 @@ GList *innodb_tables= NULL;
 GList *non_innodb_table= NULL;
 GList *table_schemas= NULL;
 GList *view_schemas= NULL;
+GList *trigger_schemas= NULL;
 GList *schema_post= NULL;
 gint non_innodb_table_counter= 0;
 gint non_innodb_done= 0;
@@ -200,6 +203,7 @@ MYSQL *create_main_connection();
 void *exec_thread(void *data);
 void write_log_file(const gchar *log_domain, GLogLevelFlags log_level, const gchar *message, gpointer user_data);
 gboolean close_sync_data_statement(FILE* file);
+void enqueue_triggers_job(char *database, char *table, struct configuration *conf);
 
 void no_log(const gchar *log_domain, GLogLevelFlags log_level, const gchar *message, gpointer user_data) {
 	(void) log_domain;
@@ -853,10 +857,6 @@ int main(int argc, char *argv[])
 	if(trx_consistency_only)
 		g_warning("Using trx_consistency_only, binlog coordinates will not be accurate if you are writing to non transactional tables.");
 
-	if (!output_directory)
-		output_directory = g_strdup_printf("%s-%04d%02d%02d-%02d%02d%02d",DIRECTORY,
-			tval.tm_year+1900, tval.tm_mon+1, tval.tm_mday,
-			tval.tm_hour, tval.tm_min, tval.tm_sec);
 
 	if (output_filename!=NULL){
 		if (db == NULL){
@@ -864,7 +864,17 @@ int main(int argc, char *argv[])
 			exit(1);
 		}			
 		output_filename_array=g_hash_table_new(NULL,NULL);
+		//TODO Dirname of the output_filename
+		output_directory=g_strdup_printf(".");
+		output_stdout=FALSE;
 	}
+
+	if (!output_directory)
+		output_directory = g_strdup_printf("%s-%04d%02d%02d-%02d%02d%02d",DIRECTORY,
+			tval.tm_year+1900, tval.tm_mon+1, tval.tm_mday,
+			tval.tm_hour, tval.tm_min, tval.tm_sec);
+	else
+		output_stdout=FALSE;
 	create_backup_dir(output_directory);
 	if (daemon_mode) {
 		pid_t pid, sid;
@@ -1363,7 +1373,7 @@ void start_dump(MYSQL *conn)
 
         for (table_schemas= g_list_first(table_schemas); table_schemas; table_schemas= g_list_next(table_schemas)) {
                 dbt= (struct db_table*) table_schemas->data;
-                dump_schema(conn, dbt->database, dbt->table, &conf);
+                dump_schema(conn,dbt->database, dbt->table, &conf);
         }
 	
 	if (less_locking) {
@@ -1388,6 +1398,7 @@ void start_dump(MYSQL *conn)
 				dump_tables(conn, nitl[n], &conf);
 			}
 		}
+		
 		g_list_free(g_list_first(non_innodb_table));
 		
 		if(g_atomic_int_get(&non_innodb_table_counter))
@@ -1424,6 +1435,7 @@ void start_dump(MYSQL *conn)
 	}
 	g_list_free(g_list_first(table_schemas));
 
+
 	for (view_schemas= g_list_first(view_schemas); view_schemas; view_schemas= g_list_next(view_schemas)) {
 		dbt= (struct db_table*) view_schemas->data;
 		dump_view(dbt->database, dbt->table, &conf);
@@ -1432,6 +1444,7 @@ void start_dump(MYSQL *conn)
 		g_free(dbt);
 	}
 	g_list_free(g_list_first(view_schemas));
+
 
 	for (schema_post= g_list_first(schema_post); schema_post; schema_post= g_list_next(schema_post)) {
 		sp= (struct schema_post*) schema_post->data;
@@ -1460,6 +1473,18 @@ void start_dump(MYSQL *conn)
 		}
 		g_async_queue_unref(conf.queue_less_locking);
 	}
+
+	while (num_threads + g_async_queue_length(conf.queue)  != 0);
+
+	for (trigger_schemas= g_list_first(trigger_schemas); trigger_schemas; trigger_schemas= g_list_next(trigger_schemas)) {
+		dbt= (struct db_table*) trigger_schemas->data;
+                enqueue_triggers_job(dbt->database, dbt->table, &conf);
+		g_free(dbt->table);
+		g_free(dbt->database);
+		g_free(dbt);
+	}
+	g_list_free(g_list_first(trigger_schemas));
+
 	
 	for (n=0; n<num_threads; n++) {
 		struct job *j = g_new0(struct job,1);
@@ -2556,29 +2581,21 @@ void dump_schema(MYSQL *conn, char *database, char *table, struct configuration 
 	else
 		sj->filename = g_strdup_printf("%s/%s.%s-schema.sql%s", output_directory, database, table, (compress_output?".gz":""));
 	g_async_queue_push(conf->queue,j);
-
 	if(dump_triggers){
 		char *query = NULL;
 		MYSQL_RES *result = NULL;
-
+		g_message("dumping triggers show");
 		query= g_strdup_printf("SHOW TRIGGERS FROM `%s` LIKE '%s'", database, table);
 		if (mysql_query(conn, query) || !(result= mysql_store_result(conn))) {
 			g_critical("Error Checking triggers for %s.%s. Err: %s", database, table, mysql_error(conn));
 			errors++;
 		}else{
 			if(mysql_num_rows(result)){
-				struct job *t = g_new0(struct job,1);
-				struct schema_job *st = g_new0(struct schema_job,1);
-				t->job_data=(void*) st;
-				st->database=g_strdup(database);
-				st->table=g_strdup(table);
-				t->conf=conf;
-				t->type=JOB_TRIGGERS;
-				if (daemon_mode)
-					st->filename = g_strdup_printf("%s/%d/%s.%s-schema-triggers.sql%s", output_directory, dump_number, database, table, (compress_output?".gz":""));
-				else
-					st->filename = g_strdup_printf("%s/%s.%s-schema-triggers.sql%s", output_directory, database, table, (compress_output?".gz":""));
-				g_async_queue_push(conf->queue,t);
+				g_message("Trigger found!! %s ",table);
+				struct db_table *dbt = g_new(struct db_table, 1);
+				dbt->database= g_strdup(database);
+				dbt->table= g_strdup(table);
+				trigger_schemas= g_list_append(trigger_schemas, dbt);
 			}
 		}
 		g_free(query);
@@ -2586,6 +2603,22 @@ void dump_schema(MYSQL *conn, char *database, char *table, struct configuration 
 			mysql_free_result(result);
 		}
 	}
+	return;
+}
+
+void enqueue_triggers_job(char *database, char *table, struct configuration *conf){
+	struct job *t = g_new0(struct job,1);
+	struct schema_job *st = g_new0(struct schema_job,1);
+	t->job_data=(void*) st;
+	st->database=g_strdup(database);
+	st->table=g_strdup(table);
+	t->conf=conf;
+	t->type=JOB_TRIGGERS;
+	if (daemon_mode)
+		st->filename = g_strdup_printf("%s/%d/%s.%s-schema-triggers.sql%s", output_directory, dump_number, database, table, (compress_output?".gz":""));
+	else
+		st->filename = g_strdup_printf("%s/%s.%s-schema-triggers.sql%s", output_directory, database, table, (compress_output?".gz":""));
+	g_async_queue_push(conf->queue,t);
 	return;
 }
 
@@ -2967,11 +3000,15 @@ gboolean real_write_data(FILE* file,GString * data) {
 	ssize_t r= 0;
 
 	while (written < data->len) {
-		if (!compress_output)
-			r = write(fileno(file), data->str + written, data->len);
-		else
-			r = gzwrite((gzFile)file, data->str + written, data->len);
-
+		if (output_stdout){
+			printf("%s",data->str);
+			r=data->len;
+		}else{
+			if (!compress_output)
+				r = write(fileno(file), data->str + written, data->len);
+			else
+				r = gzwrite((gzFile)file, data->str + written, data->len);
+		}
 		if (r < 0) {
 			g_critical("Couldn't write data to a file: %s", strerror(errno));
 			errors++;
