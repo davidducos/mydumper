@@ -21,13 +21,52 @@
 #ifndef _myloader_h
 #define _myloader_h
 
-enum job_type { JOB_SHUTDOWN, JOB_RESTORE };
+enum job_type { JOB_SHUTDOWN, JOB_RESTORE, JOB_DATABASE,JOB_SCHEMA, JOB_INDEX, JOB_ADD_SCHEMA, JOB_ADD_DATA, JOB_MESSAGE };
+enum file_state { f_CREATED, f_RUNNING, f_TERMINATED };
+enum table_state { t_NOT_CREATED, t_CREATING, t_CREATED, t_RUNNING_DATA, t_DATA_TERMINATED, t_RUNNING_INDEXES, t_WAITING, t_TERMINATED };
+enum file_kind { SCHEMA, DATA, INDEX, CONSTRAINT };
+
 
 struct configuration {
 	GAsyncQueue* queue;
 	GAsyncQueue* ready;
+	GAsyncQueue* rqueue;
+	GAsyncQueue* squeue;
+	GSList* ordered_tables;
+	GSList* constraint_list;	
 	GMutex* mutex;
+	GSList * schema_data_list;
 	int done;
+};
+
+struct table_data {
+	GSList *datafiles_list;
+	char *database;
+	char *table;
+	struct datafiles *schema;
+	struct datafiles *indexes;
+	struct datafiles *constraints;
+	struct datafiles *schemafile;
+	enum table_state status;
+	unsigned long long int size;
+	unsigned long long int amount_of_rows;
+};
+
+struct schema_data {
+	char *database;
+	GSList* constraint_list;
+	struct datafiles * view_file;
+	struct datafiles * trigger_file;
+	struct datafiles * post_file;
+	struct datafiles * create_schema_file;
+};
+
+struct datafiles{
+	char *filename;
+	GString *dml_statement;
+	GString *ddl_statement;
+	enum file_state status;
+	guint part;
 };
 
 struct thread_data {
@@ -37,15 +76,14 @@ struct thread_data {
 
 struct job {
 	enum job_type type;
-        void *job_data;
+	void *job_data;
 	struct configuration *conf;
 };
 
 struct restore_job {
 	char *database;
 	char *table;
-	char *filename;
-	guint part;
+	struct datafiles *datafile;
 };
 
 #endif

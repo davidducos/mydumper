@@ -205,6 +205,33 @@ void write_log_file(const gchar *log_domain, GLogLevelFlags log_level, const gch
 gboolean close_sync_data_statement(FILE* file);
 void enqueue_triggers_job(char *database, char *table, struct configuration *conf);
 
+
+int close_file(void * outfile){
+	if (output_stdout)
+		return 0;
+	if (output_filename==NULL){	
+		if (!compress_output){
+			return fclose((FILE *)outfile);
+		} else {
+			return gzclose((gzFile)outfile);
+		}
+	}else{
+		return close_sync_data_statement((FILE *)outfile);
+	}
+}
+void * open_file(char * filename){
+	void * outfile=NULL;
+	if (output_filename==NULL){
+		if (!compress_output)
+			outfile= g_fopen(filename, "w");
+		else
+			outfile= (void*) gzopen(filename, "w");
+	}else{
+		outfile=(void *)(gint64)g_str_hash(filename);
+	}
+	return outfile;
+}
+
 void no_log(const gchar *log_domain, GLogLevelFlags log_level, const gchar *message, gpointer user_data) {
 	(void) log_domain;
 	(void) log_level;
@@ -875,8 +902,18 @@ int main(int argc, char *argv[])
 			tval.tm_hour, tval.tm_min, tval.tm_sec);
 	else
 		output_stdout=FALSE;
-	create_backup_dir(output_directory);
+
+	if (!output_stdout){
+		create_backup_dir(output_directory);
+	}else{
+		free(output_directory);
+		output_directory=g_strdup_printf(".");
+		g_message("Writting in the stdout %s",output_directory);
+	}
+
 	if (daemon_mode) {
+		output_stdout=FALSE;
+
 		pid_t pid, sid;
 
 		pid= fork();
@@ -1527,24 +1564,18 @@ void dump_create_database(MYSQL *conn, char *database){
 	else
 		filename = g_strdup_printf("%s/%s-schema-create.sql%s", output_directory, database, (compress_output?".gz":""));
 
-	if (output_filename==NULL){
-		if (!compress_output)
-			outfile= g_fopen(filename, "w");
-		else
-			outfile= (void*) gzopen(filename, "w");
-
+	if (!output_stdout){
+		outfile=open_file(filename);
 		if (!outfile) {
 			g_critical("Error: DB: %s Could not create output file %s (%d)", database, filename, errno);
 			errors++;
 			return;
 		}
-	}else{
-		outfile=(void *)(gint64)g_str_hash(filename);
 	}
 
 	GString* statement = g_string_sized_new(statement_size);
 
-	query= g_strdup_printf("SHOW CREATE DATABASE `%s`", database);
+	query= g_strdup_printf("SHOW CREATE DATABASE IF NOT EXISTS `%s`", database);
 	if (mysql_query(conn, query) || !(result= mysql_use_result(conn))) {
 		if(success_on_1146 && mysql_errno(conn) == 1146){
 			g_warning("Error dumping create database (%s): %s", database, mysql_error(conn));
@@ -1567,16 +1598,7 @@ void dump_create_database(MYSQL *conn, char *database){
 		errors++;
 	}
 	g_free(query);
-
-	if (output_filename==NULL){	
-		if (!compress_output){
-			fclose((FILE *)outfile);
-		} else {
-			gzclose((gzFile)outfile);
-		}
-	}else{
-		close_sync_data_statement(outfile);
-	}
+	close_file(outfile);
 
 	g_string_free(statement, TRUE);
 	if (result)
@@ -2113,19 +2135,13 @@ void dump_schema_post_data(MYSQL *conn, char *database, char *filename){
 	MYSQL_ROW row2;
 	gchar **splited_st= NULL;
 
-	if (output_filename==NULL){
-		if (!compress_output)
-			outfile= g_fopen(filename, "w");
-		else
-			outfile= (void*) gzopen(filename, "w");
-	
+	if (!output_stdout){
+		outfile=open_file(filename);
 		if (!outfile) {
 			g_critical("Error: DB: %s Could not create output file %s (%d)", database, filename, errno);
 			errors++;
 			return;
 		}
-	}else{
-		outfile=(void *)(gint64)g_str_hash(filename);
 	}
 
 	GString* statement = g_string_sized_new(statement_size);
@@ -2252,16 +2268,8 @@ void dump_schema_post_data(MYSQL *conn, char *database, char *filename){
 	}
 
 	g_free(query);
+	close_file(outfile);
 
-	if (output_filename==NULL){	
-		if (!compress_output){
-			fclose((FILE *)outfile);
-		} else {
-			gzclose((gzFile)outfile);
-		}
-	}else{
-		close_sync_data_statement(outfile);
-	}
 
 	g_string_free(statement, TRUE);
 	g_strfreev(splited_st);
@@ -2274,7 +2282,7 @@ void dump_schema_post_data(MYSQL *conn, char *database, char *filename){
 
 }
 void dump_triggers_data(MYSQL *conn, char *database, char *table, char *filename){
-	void *outfile;
+	void *outfile=NULL;
 	char *query = NULL;
 	MYSQL_RES *result = NULL;
 	MYSQL_RES *result2 = NULL;
@@ -2282,19 +2290,13 @@ void dump_triggers_data(MYSQL *conn, char *database, char *table, char *filename
 	MYSQL_ROW row2;
 	gchar **splited_st= NULL;
 
-	if (output_filename==NULL){
-		if (!compress_output)
-			outfile= g_fopen(filename, "w");
-		else
-			outfile= (void*) gzopen(filename, "w");
-
+	if (!output_stdout){
+		outfile=open_file(filename);
 		if (!outfile) {
 			g_critical("Error: DB: %s Could not create output file %s (%d)", database, filename, errno);
 			errors++;
 			return;
 		}
-	}else{
-		outfile=(void *)(gint64)g_str_hash(filename);
 	}
 
 	GString* statement = g_string_sized_new(statement_size);
@@ -2339,15 +2341,7 @@ void dump_triggers_data(MYSQL *conn, char *database, char *table, char *filename
 
 	g_free(query);
 
-	if (output_filename==NULL){	
-		if (!compress_output){
-			fclose((FILE *)outfile);
-		} else {
-			gzclose((gzFile)outfile);
-		}
-	}else{
-		close_sync_data_statement(outfile);
-	}
+	close_file(outfile);
 
 	g_string_free(statement, TRUE);
 	g_strfreev(splited_st);
@@ -2364,19 +2358,13 @@ void dump_schema_data(MYSQL *conn, char *database, char *table, char *filename) 
 	MYSQL_RES *result = NULL;
 	MYSQL_ROW row;
 
-	if (output_filename==NULL){
-		if (!compress_output)
-			outfile= g_fopen(filename, "w");
-		else
-			outfile= (void*) gzopen(filename, "w");
-
+	if (!output_stdout){
+		outfile=open_file(filename);
 		if (!outfile) {
 			g_critical("Error: DB: %s Could not create output file %s (%d)", database, filename, errno);
 			errors++;
 			return;
 		}
-	}else{
-		outfile=(void *)(gint64)g_str_hash(filename);
 	}
 
 	GString* statement = g_string_sized_new(statement_size);
@@ -2417,15 +2405,7 @@ void dump_schema_data(MYSQL *conn, char *database, char *table, char *filename) 
 	}
 	g_free(query);
 
-	if (output_filename==NULL){	
-		if (!compress_output){
-			fclose((FILE *)outfile);
-		} else {
-			gzclose((gzFile)outfile);
-		}
-	}else{
-		close_sync_data_statement(outfile);
-	}
+	close_file(outfile);
 
 	g_string_free(statement, TRUE);
 	if (result)
@@ -2530,13 +2510,8 @@ void dump_view_data(MYSQL *conn, char *database, char *table, char *filename, ch
 	}
 	g_free(query);
 
-	if (!compress_output){
-		fclose((FILE *)outfile);
-		fclose((FILE *)outfile2);
-	}else{
-		gzclose((gzFile)outfile);
-		gzclose((gzFile)outfile2);
-	}
+	close_file(outfile);
+	close_file(outfile2);
 
 	g_string_free(statement, TRUE);
 	if (result)
@@ -2547,21 +2522,15 @@ void dump_view_data(MYSQL *conn, char *database, char *table, char *filename, ch
 
 void dump_table_data_file(MYSQL *conn, char *database, char *table, char *where, char *filename) {
 	void *outfile=NULL;
-
-	if (output_filename==NULL){
-		if (!compress_output)
-			outfile = g_fopen(filename, "w");
-		else
-			outfile = (void*) gzopen(filename, "w");
-
+	if (!output_stdout){
+		outfile=open_file(filename);
 		if (!outfile) {
 			g_critical("Error: DB: %s TABLE: %s Could not create output file %s (%d)", database, table, filename, errno);
 			errors++;
 			return;
 		}
-	}else{
-		outfile=(void *)(gint64)g_str_hash(filename);
 	}
+
 	guint64 rows_count = dump_table_data(conn, (FILE *)outfile, database, table, where, filename);
 	
 	if (!rows_count)
@@ -2584,14 +2553,12 @@ void dump_schema(MYSQL *conn, char *database, char *table, struct configuration 
 	if(dump_triggers){
 		char *query = NULL;
 		MYSQL_RES *result = NULL;
-		g_message("dumping triggers show");
 		query= g_strdup_printf("SHOW TRIGGERS FROM `%s` LIKE '%s'", database, table);
 		if (mysql_query(conn, query) || !(result= mysql_store_result(conn))) {
 			g_critical("Error Checking triggers for %s.%s. Err: %s", database, table, mysql_error(conn));
 			errors++;
 		}else{
 			if(mysql_num_rows(result)){
-				g_message("Trigger found!! %s ",table);
 				struct db_table *dbt = g_new(struct db_table, 1);
 				dbt->database= g_strdup(database);
 				dbt->table= g_strdup(table);
@@ -2875,6 +2842,7 @@ guint64 dump_table_data(MYSQL * conn, FILE *file, char *database, char *table, c
 									gzclose((gzFile)file);
 									file = (void*) gzopen(fcfile, "w");
 								}
+		g_message("ACA10");
 							}else{
 								close_sync_data_statement(file);
 							}
@@ -2928,19 +2896,11 @@ cleanup:
 		mysql_free_result(result);
 	}
 
-	if (output_filename==NULL){	
-		if (!compress_output){
-			fclose((FILE *)file);
-		} else {
-			gzclose((gzFile)file);
-		}
-	}else{
-		close_sync_data_statement(file);
-	}
+	close_file(file);
 
 	if (!st_in_file && !build_empty_files) {
 		// dropping the useless file
-		if (remove(fcfile)) {
+		if (!output_stdout && remove(fcfile)) {
  			g_warning("Failed to remove empty file : %s\n", fcfile);
 		}
 	}else if(chunk_filesize && fn == 1){
@@ -2963,18 +2923,18 @@ gboolean close_sync_data_statement(FILE* file) {
 	}else{
 		return FALSE;
 	}
-	g_message("File hash: %p",file);
         g_async_queue_pop(write_queue);
-        FILE * outfile;
-        if (!compress_output){
-                outfile= g_fopen(output_filename, "ab");
-                b=real_write_data(outfile,data);
-                fclose(outfile);
-        }else{
-                outfile= (void*) gzopen(output_filename, "a");
-                b=real_write_data(outfile,data);
-                gzclose((gzFile)outfile);
-        }
+        FILE * outfile=NULL;
+
+	if (!compress_output){
+	        outfile= g_fopen(output_filename, "ab");
+	        b=real_write_data(outfile,data);
+	        fclose(outfile);
+	}else{
+	        outfile= (void*) gzopen(output_filename, "a");
+	        b=real_write_data(outfile,data);
+	        gzclose((gzFile)outfile);
+	}
         g_async_queue_push(write_queue,GINT_TO_POINTER(1));
         return b;
 }
