@@ -39,6 +39,7 @@ gboolean overwrite_tables= FALSE;
 gboolean truncate_tables= FALSE;
 gboolean ignore_indexes=FALSE;
 gboolean enable_binlog= FALSE;
+gboolean use_stdin= FALSE;
 gchar *source_db= NULL;
 guint innodb_buffer_pool_size=0;
 guint count_in_files=1000;
@@ -213,8 +214,8 @@ int main(int argc, char *argv[]) {
                 }
 	}else{
 		if (!directory) {
-			g_critical("a directory needs to be specified, see --help\n");
-			exit(EXIT_FAILURE);
+			use_stdin=TRUE;
+			inputfile=strdup("");
 		} else {
 			char *p= g_strdup_printf("%s/metadata", directory);
 			if (!g_file_test(p, G_FILE_TEST_EXISTS)) {
@@ -268,7 +269,9 @@ int main(int argc, char *argv[]) {
 
 		// Print tables
 		//g_slist_foreach(conf.ordered_tables, (GFunc)print_table, NULL);
+		
 		show_report(conf.ordered_tables,conf.schema_data_list);
+		add_message_job(conf.rqueue,"MONITOR-ENDITUP");
 	}
 	struct thread_data *tm= g_new(struct thread_data, 1);
 	tm[0].conf= &conf;
@@ -283,10 +286,11 @@ int main(int argc, char *argv[]) {
 
         // This will end the Monitor Process
 	add_message_job(conf.rqueue,"MYLOADER-ENDITUP");
-
-        for (n= num_threads; n < num_threads+3; n++) {
-                g_thread_join(threads[n]);
-        }
+	if (inputfile) {
+	        for (n= num_threads; n < num_threads+3; n++) {
+                	g_thread_join(threads[n]);
+        	}
+	}
 	my_bool  my_true = TRUE;
 	mysql_options(conn, MYSQL_OPT_RECONNECT, &my_true);
 	mysql_query(conn, "/*!40014 SET FOREIGN_KEY_CHECKS=0*/");
@@ -417,7 +421,6 @@ struct schema_data * new_schema (gchar* database){
 struct schema_data *get_schema(struct configuration *conf, gchar* database){
 	GSList *schema_data_list=conf->schema_data_list;
 	struct schema_data st;
-	g_critical("cannot open   %s",database);
 	st.database=strdup(database);
 	GSList * list = g_slist_find_custom(schema_data_list,&st, (GCompareFunc)compare_schemas);
 	if (list){
@@ -435,6 +438,12 @@ struct datafiles * new_datafile(){
 	df->filename=NULL;
 	df->ddl_statement=NULL;
 	return df;
+}
+
+struct datafiles * new_ddl_filename(const char* filename){
+        struct datafiles *df=new_datafile();
+        df->filename=g_strdup(filename);
+        return df;
 }
 
 struct datafiles * new_datafile_filename(const char* filename){
@@ -523,7 +532,7 @@ void show_report(GSList *table_data_list, GSList *schema_data_list){
 
 gboolean push_next_job(struct configuration * conf){
 	GSList * ot=conf->ordered_tables;
-//	g_message("Push next job");
+	g_message("Push next job");
 	while ( ot ){
 		int amountrunning=0;
 		struct table_data * table =ot->data;
@@ -533,7 +542,7 @@ gboolean push_next_job(struct configuration * conf){
 		switch (table->status){
 			case t_NOT_CREATED:
 				if (table->schema){
-				        g_message("Creando TAbla");
+				        g_message("Creando Tabla");
 					table->status=t_CREATING;
 					table->schema->status=f_RUNNING;
 					add_job( conf->queue, table->database, table->table, table->schema , JOB_SCHEMA);
@@ -635,7 +644,7 @@ void order_files(MYSQL *conn, struct configuration *conf) {
 				continue;
 			}
 			if (g_strrstr(filename, "-schema-create.sql")){
-				get_schema(conf,database)->create_schema_file=new_datafile_filename(filename);
+				get_schema(conf,database)->create_schema_file=new_ddl_filename(filename);
 				continue;
 			}
 			struct table_data * td=add_file_to_list(&table_data_list,(gchar* )filename);
@@ -940,16 +949,18 @@ void create_database(MYSQL *conn, gchar *database){
 void add_schema(const gchar* filename, MYSQL *conn) {
 	gchar* database,*table= NULL;
 	get_database_table((gchar *)filename,&database,&table);
-	create_database(conn, database);
-	if (overwrite_tables) {
-		gchar* query;
-		g_message("Dropping table (if exists) `%s`.`%s`", db ? db : database, table);
-		query= g_strdup_printf("DROP TABLE IF EXISTS `%s`.`%s`", db ? db : database, table);
-		mysql_query(conn, query);
-		g_free(query);
+	if (table != NULL){
+		create_database(conn, database);
+		if (overwrite_tables) {
+			gchar* query;
+			g_message("Dropping table (if exists) `%s`.`%s`", db ? db : database, table);
+			query= g_strdup_printf("DROP TABLE IF EXISTS `%s`.`%s`", db ? db : database, table);
+			mysql_query(conn, query);
+			g_free(query);
+		}
+		g_message("Creating table `%s`.`%s`", db ? db : database, table);
+		restore_data(conn, database, table, filename, TRUE,TRUE);
 	}
-	g_message("Creating table `%s`.`%s`", db ? db : database, table);
-	restore_data(conn, database, table, filename, TRUE,TRUE);
 	return;
 }
 
@@ -963,18 +974,20 @@ void add_schema_string(gchar* database, gchar *table, GString* statement, MYSQL 
                         mysql_query(conn, query);
                         g_free(query);
                 }
-	}else{	
-		if (overwrite_tables) {
-			gchar* query;
-			g_message("Dropping table (if exists) `%s`.`%s`", db ? db : database, table);
-			if (! dry_run){
-				query= g_strdup_printf("DROP TABLE IF EXISTS `%s`.`%s`", db ? db : database, table);
-				mysql_query(conn, query);
-				g_free(query);
-			}
-		}	
-		g_message("Creating table `%s`.`%s`", db ? db : database, table);
-		restore_string(conn, database, table, statement, TRUE);
+	}else{
+		if (table!=NULL){	
+			if (overwrite_tables) {
+				gchar* query;
+				g_message("Dropping table (if exists) `%s`.`%s`", db ? db : database, table);
+				if (! dry_run){
+					query= g_strdup_printf("DROP TABLE IF EXISTS `%s`.`%s`", db ? db : database, table);
+					mysql_query(conn, query);
+					g_free(query);
+				}
+			}	
+			g_message("Creating table `%s`.`%s`", db ? db : database, table);
+			restore_string(conn, database, table, statement, TRUE);
+		}
 	}
 	return;
 }
@@ -984,7 +997,7 @@ void get_database(gchar *filename, gchar **database){
 	gchar** split_file= g_strsplit(filename, "-", 0);
 	gchar* ldb= strdup(split_file[0]);
 	*database=strdup(ldb);
-	g_critical("asdads %s",*database);
+//	g_critical("asdads %s",*database);
 	g_strfreev(split_file);
 }
 
@@ -1047,7 +1060,9 @@ void destroy_job (struct job ** job){
 
 void *monitor_process(struct thread_data *td) {
 	gboolean canIfinish=FALSE;
-	gboolean reader_stopped=FALSE;
+	gboolean reader_stopped=inputfile == NULL;
+	gboolean feeder_working=inputfile != NULL;
+	int sleeping_threads=0;
 	struct configuration * conf=td->conf;
 	GSList **ordered_tables=&(conf->ordered_tables);
 	const char *cc;
@@ -1144,11 +1159,25 @@ void *monitor_process(struct thread_data *td) {
 				break;
 		}
 
-		pnjs=push_next_job(conf); 
+		pnjs=push_next_job(conf);
+		if (sleeping_threads>=0 ){
+			if ( !canIfinish ){
+				if (!pnjs)
+					sleeping_threads++;
+			}else{
+				if (sleeping_threads==0 ){
+					sleeping_threads--;
+				}else{
+					pnjs=push_next_job(conf);
+					if (pnjs)
+						sleeping_threads--;
+				}
+			}
+                }
 		guint amount=0;
 		g_slist_foreach(conf->ordered_tables, (GFunc)table_undone, &amount);
-//		g_message("Finish: %d \t reader_stopped: %d \t amount: %d PNJS: %d \t RQueued: %d \t QQueued: %d",canIfinish,reader_stopped,amount,pnjs,g_async_queue_length(conf->rqueue),g_async_queue_length(conf->queue));
-		if ( !canIfinish && reader_stopped && amount <= num_threads ){
+		g_message("Finish: %d \t reader_stopped: %d \t amount: %d PNJS: %d \t RQueued: %d \t QQueued: %di \tSleeping Threads: %d",canIfinish,reader_stopped,amount,pnjs,g_async_queue_length(conf->rqueue),g_async_queue_length(conf->queue),sleeping_threads);
+		if ( feeder_working && !canIfinish && reader_stopped && amount <= num_threads ){
 			reader_stopped=FALSE;
 			g_message("Feeder UNPaused %d ",amount);
 			g_mutex_unlock(db_mutex);
@@ -1158,12 +1187,12 @@ void *monitor_process(struct thread_data *td) {
 			j->type= JOB_SHUTDOWN;
 			g_async_queue_push(conf->queue, j);
 		}
-		if (canIfinish && !pnjs && g_async_queue_length(conf->rqueue) == 0){
+		if ( feeder_working && canIfinish && !pnjs && g_async_queue_length(conf->rqueue) == 0){
 			g_message("Reviewing Status");
 			g_slist_foreach(conf->ordered_tables, (GFunc)check_db_status, NULL);
 		}
 			
-		if ( !canIfinish && reader_stopped &&amount > num_threads){
+		if ( feeder_working && !canIfinish && reader_stopped && amount > 2*num_threads){
 			g_mutex_lock(db_mutex);
 			g_message("Feeder Paused %d ",amount);
 			reader_stopped=TRUE;
@@ -1217,13 +1246,16 @@ void *process_queue(struct thread_data *td) {
 					g_message("Thread %d restoring `%s`.`%s` filename %s part %d", td->thread_id, rj->database, rj->table, df->filename, df->part);
 					restore_data(thrconn, rj->database, rj->table, df->filename, FALSE, TRUE);
 				}
+                                g_message("Thread %d restoring ENDED `%s`.`%s` filename %s part %d", td->thread_id, rj->database, rj->table, df->filename, df->part);
 				g_async_queue_push(conf->rqueue, job);
 				break;
 			case JOB_DATABASE:
 				rj= (struct restore_job *)job->job_data;
 				df =rj->datafile;
-				g_message("Thread %d restoring database on `%s`", td->thread_id, rj->database);
-				add_schema_string(rj->database, NULL, df->ddl_statement, thrconn);
+				if (rj->database!=NULL){
+					g_message("Thread %d restoring database on `%s`", td->thread_id, rj->database);
+					add_schema_string(rj->database, NULL, df->ddl_statement, thrconn);
+				}
 				g_async_queue_push(conf->rqueue, job);
 				break;
 			case JOB_SCHEMA:
@@ -1463,7 +1495,10 @@ void read_file_process( struct configuration *conf){
 	GAsyncQueue* lqueue=conf->squeue;
 	FILE *infile;
 	gboolean eof=FALSE;
-	infile= g_fopen(inputfile, "r");
+	if (use_stdin)
+		infile = stdin;
+	else
+		infile= g_fopen(inputfile, "r");
 	GString *statement=g_string_new("");
 	g_message("Starting read file process");
 	while (!feof(infile) && !eof){
@@ -1548,6 +1583,7 @@ void db_feeder(struct configuration *conf){
                         if (split_dbname_tablename!=NULL && split_dbname_tablename[0]!=NULL && split_dbname_tablename[2]!=NULL)
 				read_database_table(split_dbname_tablename[2],&database,&table);
 			g_strfreev(split_dbname_tablename);
+			g_message("create database!!");
 			add_job(conf->rqueue,database,table,new_datafile_ddl_statement(g_string_new(finalstatement->str)),JOB_DATABASE);
 			g_string_free(finalstatement,TRUE);
 			finalstatement=g_string_new("");
