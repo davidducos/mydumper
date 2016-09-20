@@ -58,8 +58,7 @@ static GMutex * init_mutex = NULL;
 /* Program options */
 gchar *output_directory= NULL;
 gchar *output_filename=NULL;
-gboolean output_stdout=TRUE;
-
+enum destination_type destination_type;
 GHashTable *output_filename_array=NULL;
 guint statement_size= 1000000;
 guint rows_per_file= 0;
@@ -207,7 +206,7 @@ void enqueue_triggers_job(char *database, char *table, struct configuration *con
 
 
 int close_file(void * outfile){
-	if (output_stdout)
+	if (destination_type==STDOUT)
 		return 0;
 	if (output_filename==NULL){	
 		if (!compress_output){
@@ -893,17 +892,18 @@ int main(int argc, char *argv[])
 		output_filename_array=g_hash_table_new(NULL,NULL);
 		//TODO Dirname of the output_filename
 		output_directory=g_strdup_printf(".");
-		output_stdout=FALSE;
+		destination_type = SPEC_FILE;
 	}
 
-	if (!output_directory)
+	if (!output_directory){
 		output_directory = g_strdup_printf("%s-%04d%02d%02d-%02d%02d%02d",DIRECTORY,
 			tval.tm_year+1900, tval.tm_mon+1, tval.tm_mday,
 			tval.tm_hour, tval.tm_min, tval.tm_sec);
-	else
-		output_stdout=FALSE;
-
-	if (!output_stdout){
+		destination_type = FOLDER;
+	}else{
+		destination_type = STDOUT;
+	}
+	if (destination_type !=  STDOUT){
 		create_backup_dir(output_directory);
 	}else{
 		free(output_directory);
@@ -912,7 +912,6 @@ int main(int argc, char *argv[])
 	}
 
 	if (daemon_mode) {
-		output_stdout=FALSE;
 
 		pid_t pid, sid;
 
@@ -1564,7 +1563,7 @@ void dump_create_database(MYSQL *conn, char *database){
 	else
 		filename = g_strdup_printf("%s/%s-schema-create.sql%s", output_directory, database, (compress_output?".gz":""));
 
-	if (!output_stdout){
+	if (destination_type != STDOUT){
 		outfile=open_file(filename);
 		if (!outfile) {
 			g_critical("Error: DB: %s Could not create output file %s (%d)", database, filename, errno);
@@ -2135,7 +2134,7 @@ void dump_schema_post_data(MYSQL *conn, char *database, char *filename){
 	MYSQL_ROW row2;
 	gchar **splited_st= NULL;
 
-	if (!output_stdout){
+	if (destination_type!=STDOUT){
 		outfile=open_file(filename);
 		if (!outfile) {
 			g_critical("Error: DB: %s Could not create output file %s (%d)", database, filename, errno);
@@ -2290,7 +2289,7 @@ void dump_triggers_data(MYSQL *conn, char *database, char *table, char *filename
 	MYSQL_ROW row2;
 	gchar **splited_st= NULL;
 
-	if (!output_stdout){
+	if (destination_type!=STDOUT){
 		outfile=open_file(filename);
 		if (!outfile) {
 			g_critical("Error: DB: %s Could not create output file %s (%d)", database, filename, errno);
@@ -2358,7 +2357,7 @@ void dump_schema_data(MYSQL *conn, char *database, char *table, char *filename) 
 	MYSQL_RES *result = NULL;
 	MYSQL_ROW row;
 
-	if (!output_stdout){
+	if (destination_type!=STDOUT){
 		outfile=open_file(filename);
 		if (!outfile) {
 			g_critical("Error: DB: %s Could not create output file %s (%d)", database, filename, errno);
@@ -2522,7 +2521,7 @@ void dump_view_data(MYSQL *conn, char *database, char *table, char *filename, ch
 
 void dump_table_data_file(MYSQL *conn, char *database, char *table, char *where, char *filename) {
 	void *outfile=NULL;
-	if (!output_stdout){
+	if (destination_type!=STDOUT){
 		outfile=open_file(filename);
 		if (!outfile) {
 			g_critical("Error: DB: %s TABLE: %s Could not create output file %s (%d)", database, table, filename, errno);
@@ -2900,7 +2899,7 @@ cleanup:
 
 	if (!st_in_file && !build_empty_files) {
 		// dropping the useless file
-		if (!output_stdout && remove(fcfile)) {
+		if (destination_type!=STDOUT && remove(fcfile)) {
  			g_warning("Failed to remove empty file : %s\n", fcfile);
 		}
 	}else if(chunk_filesize && fn == 1){
@@ -2960,7 +2959,7 @@ gboolean real_write_data(FILE* file,GString * data) {
 	ssize_t r= 0;
 
 	while (written < data->len) {
-		if (output_stdout){
+		if (destination_type==STDOUT){
 			printf("%s",data->str);
 			r=data->len;
 		}else{
@@ -3011,3 +3010,8 @@ void write_log_file(const gchar *log_domain, GLogLevelFlags log_level, const gch
 	}
 	g_string_free(message_out, TRUE);
 }
+
+
+
+
+

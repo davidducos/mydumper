@@ -21,6 +21,7 @@
 
 #ifndef _mydumper_h
 #define _mydumper_h
+enum destination_type { FOLDER, SPEC_FILE, STDOUT };
 
 enum job_type { JOB_SHUTDOWN, JOB_RESTORE, JOB_DUMP, JOB_DUMP_NON_INNODB, JOB_SCHEMA, JOB_VIEW, JOB_TRIGGERS, JOB_SCHEMA_POST, JOB_BINLOG, JOB_LOCK_DUMP_NON_INNODB };
 
