@@ -33,6 +33,7 @@ GAsyncQueue *stream_queue = NULL;
 extern int detected_server;
 
 GHashTable * initialize_hash_of_session_variables(){
+    g_message("TEST");
   GHashTable * set_session_hash=g_hash_table_new ( g_str_hash, g_str_equal );
   if (detected_server == SERVER_TYPE_MYSQL){
     g_hash_table_insert(set_session_hash,g_strdup("WAIT_TIMEOUT"),g_strdup("2147483"));
